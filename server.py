@@ -12,14 +12,11 @@ import os
 
 # ---------- Configuration ----------
 MODEL_WEIGHTS = "deepfake_model_best.pth"
-# Use GPU if available
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# ---------- Logging ----------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("deepfake_server")
 
-# ---------- Model definition ----------
 class DeepFakeDetector(nn.Module):
     def __init__(self):
         super(DeepFakeDetector, self).__init__()
@@ -69,42 +66,32 @@ class DeepFakeDetector(nn.Module):
 
     def forward(self, x):
         # x: [B, 3, H, W]
-        vit_feat = self.vit(x)  # could be [B, 768], or [B, N, C], or [B, C, h, w] depending on torchvision
-        # normalize feature shape to [B, embed_dim]
+        vit_feat = self.vit(x)  
         if isinstance(vit_feat, (list, tuple)):
-            # some models return tuple, take first
             vit_feat = vit_feat[0]
         if vit_feat.dim() == 3:
-            # shape [B, N, C] -> take class token if present
             try:
                 vit_feat = vit_feat[:, 0, :]  # [B, C]
             except Exception:
                 vit_feat = vit_feat.reshape(vit_feat.size(0), -1)
         elif vit_feat.dim() == 4:
-            # shape [B, C, h, w] -> global pool
             vit_feat = F.adaptive_avg_pool2d(vit_feat, (1, 1)).reshape(vit_feat.size(0), -1)
 
-        # safeguard: if still flattened differently, ensure correct dim
         if vit_feat.dim() == 1:
             vit_feat = vit_feat.unsqueeze(0)
 
-        # small gan head MLP
         gan_feat = self.gan_fc(vit_feat)
 
-        # FFT feature: compute magnitude of 2D FFT on grayscale mean channel
-        # compute grayscale
-        gray = x.mean(dim=1, keepdim=True)  # [B,1,H,W]
+
+        gray = x.mean(dim=1, keepdim=True)
         fft = torch.fft.fft2(gray)  # complex tensor
         fft_mag = torch.abs(fft)
         fft_mag = F.adaptive_avg_pool2d(fft_mag, (32, 32)).flatten(start_dim=1)
         fft_feat = self.fft_fc(fft_mag)
 
-        # simple "LBP-like" feature: here we keep the pooled grayscale as a feature vector
-        # (NOTE: Real LBP computation is different; this is a placeholder)
         gray_pooled = F.adaptive_avg_pool2d(gray, (32, 32)).flatten(start_dim=1)
         lbp_feat = self.lbp_fc(gray_pooled)
 
-        # color feature
         color_feat = F.adaptive_avg_pool2d(x, (32, 32)).flatten(start_dim=1)
         color_feat = self.color_fc(color_feat)
 
@@ -112,10 +99,8 @@ class DeepFakeDetector(nn.Module):
         out = self.classifier(fused)
         return out
 
-# ---------- Instantiate model ----------
 model = DeepFakeDetector().to(device)
 
-# Try to load weights if available
 if os.path.exists(MODEL_WEIGHTS):
     try:
         state = torch.load(MODEL_WEIGHTS, map_location=device)
@@ -133,8 +118,6 @@ else:
 
 model.eval()
 
-# ---------- Transforms ----------
-# Use ImageNet normalization for ViT (important)
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
@@ -142,7 +125,6 @@ transform = transforms.Compose([
                          [0.229, 0.224, 0.225])
 ])
 
-# ---------- FastAPI app ----------
 app = FastAPI()
 
 app.add_middleware(
@@ -169,7 +151,6 @@ async def predict(file: UploadFile = File(...)):
         model.eval()
         with torch.no_grad():
             output = model(img_t)
-            # ensure scalar
             if output.dim() > 0:
                 output = output.squeeze()
             logit = float(output.item())
@@ -178,7 +159,6 @@ async def predict(file: UploadFile = File(...)):
 
         logger.info("Predict: prob_fake=%.4f, prob_real=%.4f, size=%dx%d", prob_fake, prob_real, width, height)
 
-        # return both probabilities and image meta
         result = {
             "isReal": prob_real > prob_fake,
             "confidence": max(prob_real, prob_fake),
